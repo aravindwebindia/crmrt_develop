@@ -1,0 +1,11 @@
+# Frontend
+frontend/node_modules/
+frontend/build/
+
+# Backend
+backend/sql/
+backend/vendor/
+backend/uploads
+
+unified-config.json
+switch-env.js

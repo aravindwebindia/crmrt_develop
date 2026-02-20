@@ -1,0 +1,12 @@
+{
+  "environment": "development",
+  "app": {
+    "name": "CRM System",
+    "version": "1.0.0"
+  },
+  "server": {
+    "frontend_url": "http://localhost:3000",
+    "backend_url": "http://localhost/crmrt_live2/backend",
+    "api_base_url": "http://localhost/crmrt_live2/backend/api"
+  }
+}
