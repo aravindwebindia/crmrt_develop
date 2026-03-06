@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Printer, Download, Calendar, Building, FileText, DollarSign, Clock, Plus, AlertTriangle, Package } from 'lucide-react';
+import { X, Printer, Building, FileText, Clock, Plus, AlertTriangle, Package } from 'lucide-react';
 import { toast } from 'react-toastify';
 import api from '../utils/axiosConfig';
 
@@ -8,36 +8,55 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
   const [isCreating, setIsCreating] = useState(false);
   const [nextBillDate, setNextBillDate] = useState('');
   const [serviceDetails, setServiceDetails] = useState([]);
+  const [previousDetails, setPreviousDetails] = useState([]);
   const [loadingServices, setLoadingServices] = useState(false);
-  
-  // Fetch service details when modal opens
+  const [selectedServiceIds, setSelectedServiceIds] = useState([]);
+  const [customPeriods, setCustomPeriods] = useState({});
+
+  useEffect(() => {
+    setSelectedServiceIds([]);
+    setNextBillDate('');
+    setCustomPeriods({});
+  }, [recurringInvoice?.invoice_id, isOpen]);
+
   useEffect(() => {
     const fetchServiceDetails = async () => {
-      if (!isOpen || !recurringInvoice?.bill_to_date || (!recurringInvoice?.invoice_id && !recurringInvoice?.sale_order_id)) {
+      if (!isOpen || !recurringInvoice?.invoice_id) {
         setServiceDetails([]);
+        setPreviousDetails([]);
         return;
       }
-      
+
       setLoadingServices(true);
       try {
-        // Use sale_order_id if available (preferred), otherwise fallback to invoice_id
-        const params = recurringInvoice.sale_order_id 
-          ? `sale_order_id=${recurringInvoice.sale_order_id}&bill_to_date=${recurringInvoice.bill_to_date}`
-          : `invoice_id=${recurringInvoice.invoice_id}&bill_to_date=${recurringInvoice.bill_to_date}`;
+        const params = `invoice_id=${recurringInvoice.invoice_id}`;
         const response = await api.get(`/recurring-invoice-details.php?${params}`);
         if (response.data.success) {
-          setServiceDetails(response.data.data || []);
+          const details = response.data.data || [];
+          setServiceDetails(details);
+          setPreviousDetails(response.data.previous_details || []);
+          setSelectedServiceIds(details.filter((s) => Number(s.is_eligible) === 1).map((s) => s.id));
+          const initialCustomPeriods = {};
+          details.forEach((s) => {
+            initialCustomPeriods[String(s.id)] = {
+              next_from_date: s.next_from_date || '',
+              next_to_date: s.next_to_date || '',
+            };
+          });
+          setCustomPeriods(initialCustomPeriods);
         }
       } catch (error) {
-        console.error('Error fetching service details:', error);
-        // Don't show error toast, just silently fail
+        setServiceDetails([]);
+        setPreviousDetails([]);
+        setSelectedServiceIds([]);
+        toast.error('Failed to fetch recurring service details');
       } finally {
         setLoadingServices(false);
       }
     };
 
     fetchServiceDetails();
-  }, [isOpen, recurringInvoice?.invoice_id, recurringInvoice?.sale_order_id, recurringInvoice?.bill_to_date]);
+  }, [isOpen, recurringInvoice?.invoice_id]);
 
   if (!isOpen || !recurringInvoice) return null;
 
@@ -46,7 +65,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
       style: 'currency',
       currency: 'INR',
       minimumFractionDigits: 2,
-    }).format(amount);
+    }).format(amount || 0);
   };
 
   const formatDate = (dateString) => {
@@ -60,13 +79,12 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
 
   const getDueStatusBadge = (dueStatus, daysUntilDue) => {
     const statusConfig = {
-      'Due': { color: '#DC2626', bgColor: '#FEE2E2', text: 'Due Today' },
-      'Overdue': { color: '#DC2626', bgColor: '#FEE2E2', text: `Overdue (${Math.abs(daysUntilDue)} days)` },
-      'Upcoming Due': { color: '#D97706', bgColor: '#FEF3C7', text: `Due in ${daysUntilDue} days` }
+      Due: { color: '#DC2626', bgColor: '#FEE2E2', text: 'Due Today' },
+      Overdue: { color: '#DC2626', bgColor: '#FEE2E2', text: `Overdue (${Math.abs(daysUntilDue)} days)` },
+      'Upcoming Due': { color: '#D97706', bgColor: '#FEF3C7', text: `Due in ${daysUntilDue} days` },
     };
-    
+
     const config = statusConfig[dueStatus] || { color: '#6B7280', bgColor: '#F3F4F6', text: 'Unknown' };
-    
     return (
       <span
         style={{
@@ -76,7 +94,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
           fontWeight: '600',
           color: config.color,
           backgroundColor: config.bgColor,
-          border: `1px solid ${config.color}20`
+          border: `1px solid ${config.color}20`,
         }}
       >
         {config.text}
@@ -84,122 +102,103 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
     );
   };
 
-  const getBillCycleText = (cycleName, cycleTerms, billFollowup) => {
-    if (!cycleName) return '-';
-    
-    const followupNumber = billFollowup || 1;
-    const cycleText = cycleName.toLowerCase();
-    
-    if (cycleText.includes('quarterly')) {
-      return `${followupNumber}${getOrdinalSuffix(followupNumber)} Quarterly Payment`;
-    } else if (cycleText.includes('half yearly')) {
-      return `${followupNumber}${getOrdinalSuffix(followupNumber)} Half Yearly Payment`;
-    } else if (cycleText.includes('yearly')) {
-      return `${followupNumber}${getOrdinalSuffix(followupNumber)} Yearly Payment`;
-    } else if (cycleText.includes('monthly')) {
-      return `${followupNumber}${getOrdinalSuffix(followupNumber)} Monthly Payment`;
-    } else {
-      return `${followupNumber}${getOrdinalSuffix(followupNumber)} ${cycleName} Payment`;
-    }
+  const handleToggleService = (serviceId, enabled) => {
+    if (!enabled) return;
+    setSelectedServiceIds((prev) =>
+      prev.includes(serviceId) ? prev.filter((id) => id !== serviceId) : [...prev, serviceId]
+    );
   };
 
-  const getOrdinalSuffix = (num) => {
-    const j = num % 10;
-    const k = num % 100;
-    if (j === 1 && k !== 11) return 'st';
-    if (j === 2 && k !== 12) return 'nd';
-    if (j === 3 && k !== 13) return 'rd';
-    return 'th';
-  };
-
-  const handleCreateNextBill = async () => {
-    // Validate date
+  const handleCreateRecurringInvoice = async () => {
     if (!nextBillDate) {
-      toast.error('Please select a date for the next bill');
+      toast.error('Please select proforma invoice date');
+      return;
+    }
+    if (selectedServiceIds.length === 0) {
+      toast.error('Please select at least one eligible service');
       return;
     }
 
     setIsCreating(true);
     try {
-      const response = await api.post('/create-next-recurring-invoice.php', {
-        sale_order_id: recurringInvoice.sale_order_id, // Use sale_order_id to find all related invoices
-        bill_to_date: recurringInvoice.bill_to_date, // Only create for services with this specific end date
-        inv_date: nextBillDate
+      const response = await api.post('/recurring-invoice-details.php', {
+        invoice_id: recurringInvoice.invoice_id,
+        inv_date: nextBillDate,
+        selected_detail_ids: selectedServiceIds,
+        custom_periods: customPeriods,
       });
 
       if (response.data.success) {
-        // Handle grouped response (multiple invoices) or single invoice response
-        if (response.data.data.created_invoices) {
-          // Grouped by end date - multiple invoices created
-          const invoiceNumbers = response.data.data.created_invoices.map(inv => inv.invoice_number).join(', ');
-          toast.success(`${response.data.data.total_invoices} recurring invoice(s) created successfully! Invoices: ${invoiceNumbers}`);
-        } else {
-          // Single invoice response (backward compatibility)
-          toast.success(`Next recurring invoice created successfully! New invoice: ${response.data.data.new_invoice_number}`);
-        }
+        toast.success(`Recurring invoice created: ${response.data.data.new_invoice_number}`);
         setShowConfirmDialog(false);
-        setNextBillDate(''); // Reset date
+        setNextBillDate('');
         onClose();
         if (onNextBillCreated) {
           onNextBillCreated();
         }
       } else {
-        toast.error(response.data.message || 'Failed to create next recurring invoice');
+        toast.error(response.data.message || 'Failed to create recurring invoice');
       }
     } catch (error) {
-      toast.error('Failed to create next recurring invoice');
+      toast.error(error?.response?.data?.message || 'Failed to create recurring invoice');
     } finally {
       setIsCreating(false);
     }
   };
 
+  const eligibleCount = serviceDetails.filter((s) => Number(s.is_eligible) === 1).length;
+
+  const handlePeriodChange = (serviceId, field, value) => {
+    setCustomPeriods((prev) => ({
+      ...prev,
+      [String(serviceId)]: {
+        ...(prev[String(serviceId)] || {}),
+        [field]: value,
+      },
+    }));
+  };
+
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0, 0, 0, 0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1000,
-      padding: '1rem'
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '0.75rem',
-        width: '100%',
-        maxWidth: '800px',
-        maxHeight: '90vh',
-        overflow: 'auto',
-        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
-      }}>
-        {/* Header */}
-        <div style={{
-          padding: '1.5rem',
-          borderBottom: '1px solid #e5e7eb',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center'
-        }}>
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+        padding: '1rem',
+      }}
+    >
+      <div
+        style={{
+          backgroundColor: 'white',
+          borderRadius: '0.75rem',
+          width: '100%',
+          maxWidth: '980px',
+          maxHeight: '90vh',
+          overflow: 'auto',
+          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+        }}
+      >
+        <div
+          style={{
+            padding: '1.5rem',
+            borderBottom: '1px solid #e5e7eb',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
           <div>
-            <h2 style={{
-              fontSize: '1.5rem',
-              fontWeight: '700',
-              color: '#1f2937',
-              margin: '0 0 0.25rem 0'
-            }}>
+            <h2 style={{ fontSize: '1.5rem', fontWeight: '700', color: '#1f2937', margin: '0 0 0.25rem 0' }}>
               Recurring Invoice Details
             </h2>
-            <p style={{
-              fontSize: '0.875rem',
-              color: '#6b7280',
-              margin: 0
-            }}>
-              {recurringInvoice.pi_number}
-            </p>
+            <p style={{ fontSize: '0.875rem', color: '#6b7280', margin: 0 }}>{recurringInvoice.pi_number}</p>
           </div>
           <div style={{ display: 'flex', gap: '0.5rem' }}>
             <button
@@ -215,7 +214,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                 gap: '0.5rem',
                 fontSize: '0.875rem',
                 fontWeight: '500',
-                color: '#374151'
+                color: '#374151',
               }}
             >
               <Printer size={16} />
@@ -234,7 +233,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                 gap: '0.5rem',
                 fontSize: '0.875rem',
                 fontWeight: '500',
-                color: '#dc2626'
+                color: '#dc2626',
               }}
             >
               <X size={16} />
@@ -243,205 +242,199 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
           </div>
         </div>
 
-        {/* Content */}
         <div style={{ padding: '1.5rem' }}>
-          {/* Status Badge */}
-          <div style={{ marginBottom: '2rem', textAlign: 'center' }}>
+          <div style={{ marginBottom: '1.5rem', textAlign: 'center' }}>
             {getDueStatusBadge(recurringInvoice.due_status, recurringInvoice.days_until_due)}
           </div>
 
-          {/* Details Grid */}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
-            gap: '1.5rem',
-            marginBottom: '2rem'
-          }}>
-            {/* Invoice Information */}
-            <div style={{
-              backgroundColor: '#f9fafb',
-              padding: '1.5rem',
-              borderRadius: '0.5rem',
-              border: '1px solid #e5e7eb'
-            }}>
-              <h3 style={{
-                fontSize: '1.125rem',
-                fontWeight: '600',
-                color: '#1f2937',
-                margin: '0 0 1rem 0',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem'
-              }}>
-                <FileText size={20} />
-                Invoice Information
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+              gap: '1rem',
+              marginBottom: '1.5rem',
+            }}
+          >
+            <div style={{ backgroundColor: '#f9fafb', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #e5e7eb' }}>
+              <h3 style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937', margin: '0 0 0.75rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <FileText size={18} />
+                Invoice
               </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>PI Number:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>{recurringInvoice.pi_number}</div>
-                </div>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>SO Number:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>{recurringInvoice.saleorder_no || '-'}</div>
-                </div>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Invoice Date:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>{formatDate(recurringInvoice.pi_date)}</div>
-                </div>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Total Amount:</span>
-                  <div style={{ fontSize: '1.25rem', fontWeight: '700', color: '#059669' }}>{formatCurrency(recurringInvoice.grand_total)}</div>
-                </div>
+              <div style={{ fontSize: '0.875rem', color: '#374151', lineHeight: 1.7 }}>
+                <div>PI: <strong>{recurringInvoice.pi_number}</strong></div>
+                <div>SO: <strong>{recurringInvoice.saleorder_no || '-'}</strong></div>
+                <div>Date: <strong>{formatDate(recurringInvoice.pi_date)}</strong></div>
+                <div>Amount: <strong>{formatCurrency(recurringInvoice.grand_total)}</strong></div>
               </div>
             </div>
 
-            {/* Company Information */}
-            <div style={{
-              backgroundColor: '#f9fafb',
-              padding: '1.5rem',
-              borderRadius: '0.5rem',
-              border: '1px solid #e5e7eb'
-            }}>
-              <h3 style={{
-                fontSize: '1.125rem',
-                fontWeight: '600',
-                color: '#1f2937',
-                margin: '0 0 1rem 0',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem'
-              }}>
-                <Building size={20} />
-                Company Information
+            <div style={{ backgroundColor: '#f9fafb', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #e5e7eb' }}>
+              <h3 style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937', margin: '0 0 0.75rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Building size={18} />
+                Company
               </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Company:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>{recurringInvoice.company_name}</div>
-                </div>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Billing Company:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>{recurringInvoice.billing_company || '-'}</div>
-                </div>
+              <div style={{ fontSize: '0.875rem', color: '#374151', lineHeight: 1.7 }}>
+                <div>Name: <strong>{recurringInvoice.company_name || '-'}</strong></div>
+                <div>Billing: <strong>{recurringInvoice.billing_company || '-'}</strong></div>
+                <div>Active services: <strong>{serviceDetails.length}</strong></div>
               </div>
             </div>
 
-            {/* Payment Information */}
-            <div style={{
-              backgroundColor: '#f9fafb',
-              padding: '1.5rem',
-              borderRadius: '0.5rem',
-              border: '1px solid #e5e7eb'
-            }}>
-              <h3 style={{
-                fontSize: '1.125rem',
-                fontWeight: '600',
-                color: '#1f2937',
-                margin: '0 0 1rem 0',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem'
-              }}>
-                <Clock size={20} />
-                Payment Information
+            <div style={{ backgroundColor: '#f9fafb', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #e5e7eb' }}>
+              <h3 style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937', margin: '0 0 0.75rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Clock size={18} />
+                Eligibility
               </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Next Due Date:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>{formatDate(recurringInvoice.bill_to_date_plus_one)}</div>
-                </div>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Bill Cycle:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>{recurringInvoice.cycle_name || '-'}</div>
-                </div>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Payment Collection:</span>
-                  <div style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937' }}>
-                    {getBillCycleText(recurringInvoice.cycle_name, recurringInvoice.cycle_terms, recurringInvoice.bill_followup)}
-                  </div>
-                </div>
-                <div>
-                  <span style={{ fontSize: '0.875rem', color: '#6b7280', fontWeight: '500' }}>Days Until Due:</span>
-                  <div style={{ 
-                    fontSize: '1rem', 
-                    fontWeight: '600', 
-                    color: recurringInvoice.days_until_due < 0 ? '#dc2626' : recurringInvoice.days_until_due === 0 ? '#d97706' : '#059669'
-                  }}>
-                    {recurringInvoice.days_until_due < 0 ? `${Math.abs(recurringInvoice.days_until_due)} days overdue` : 
-                     recurringInvoice.days_until_due === 0 ? 'Due today' : 
-                     `${recurringInvoice.days_until_due} days remaining`}
-                  </div>
-                </div>
+              <div style={{ fontSize: '0.875rem', color: '#374151' }}>
+                <div style={{ marginBottom: '0.4rem' }}>Checkbox enabled from 30 days before next period start.</div>
+                <div>Eligible: <strong>{eligibleCount}</strong></div>
+                <div>Selected: <strong>{selectedServiceIds.length}</strong></div>
               </div>
             </div>
           </div>
 
-          {/* Service Details */}
-          <div style={{
-            backgroundColor: '#f9fafb',
-            padding: '1.5rem',
-            borderRadius: '0.5rem',
-            border: '1px solid #e5e7eb',
-            marginTop: '1.5rem'
-          }}>
-            <h3 style={{
-              fontSize: '1.125rem',
-              fontWeight: '600',
-              color: '#1f2937',
-              margin: '0 0 1rem 0',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.5rem'
-            }}>
+          <div
+            style={{
+              backgroundColor: '#f9fafb',
+              padding: '1rem',
+              borderRadius: '0.5rem',
+              border: '1px solid #e5e7eb',
+              marginTop: '1rem',
+            }}
+          >
+            <h3 style={{ fontSize: '1.125rem', fontWeight: '600', color: '#1f2937', margin: '0 0 1rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Package size={20} />
-              Service Details
+              Services
             </h3>
+
             {loadingServices ? (
-              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280' }}>
-                Loading services...
-              </div>
+              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280' }}>Loading services...</div>
             ) : serviceDetails.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280' }}>
-                No service details found
-              </div>
+              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280' }}>No active services found</div>
             ) : (
               <div style={{ overflowX: 'auto' }}>
-                <table style={{
-                  width: '100%',
-                  borderCollapse: 'collapse',
-                  fontSize: '0.875rem'
-                }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
                   <thead>
-                    <tr style={{
-                      backgroundColor: '#f3f4f6',
-                      borderBottom: '2px solid #e5e7eb'
-                    }}>
-                      <th style={{ padding: '0.75rem', textAlign: 'left', fontWeight: '600', color: '#374151' }}>#</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'left', fontWeight: '600', color: '#374151' }}>Service Name</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'right', fontWeight: '600', color: '#374151' }}>Qty</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'right', fontWeight: '600', color: '#374151' }}>Rate</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'right', fontWeight: '600', color: '#374151' }}>Amount</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'right', fontWeight: '600', color: '#374151' }}>Invoice Amt</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'center', fontWeight: '600', color: '#374151' }}>Cycle</th>
+                    <tr style={{ backgroundColor: '#f3f4f6', borderBottom: '2px solid #e5e7eb' }}>
+                      <th style={{ padding: '0.75rem', textAlign: 'center' }}>Select</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'left' }}>Service</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'center' }}>Cycle</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'center' }}>Followup</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'center' }}>Current Period</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'center' }}>Next Period</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'right' }}>Amount</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'left' }}>Status</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {serviceDetails.map((service, index) => (
-                      <tr 
-                        key={service.id} 
-                        style={{
-                          borderBottom: '1px solid #e5e7eb',
-                          backgroundColor: index % 2 === 0 ? 'white' : '#f9fafb'
-                        }}
-                      >
-                        <td style={{ padding: '0.75rem', color: '#6b7280' }}>{index + 1}</td>
-                        <td style={{ padding: '0.75rem', fontWeight: '500', color: '#1f2937' }}>{service.service_name || '-'}</td>
-                        <td style={{ padding: '0.75rem', textAlign: 'right', color: '#374151' }}>{parseFloat(service.qty || 0).toFixed(2)}</td>
-                        <td style={{ padding: '0.75rem', textAlign: 'right', color: '#374151' }}>{formatCurrency(service.inv_rate || 0)}</td>
-                        <td style={{ padding: '0.75rem', textAlign: 'right', color: '#374151' }}>{formatCurrency(service.inv_amount || 0)}</td>
-                        <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: '600', color: '#059669' }}>{formatCurrency(service.inv_total_amount || 0)}</td>
-                        <td style={{ padding: '0.75rem', textAlign: 'center', color: '#6b7280', fontSize: '0.75rem' }}>{service.cycle_name || '-'}</td>
+                    {serviceDetails.map((service, index) => {
+                      const isEligible = Number(service.is_eligible) === 1;
+                      const isYearly = Number(service.is_yearly) === 1;
+                      const isDateEditable = Number(service.is_date_editable) === 1;
+                      const isSelected = selectedServiceIds.includes(service.id);
+                      return (
+                        <tr key={service.id} style={{ borderBottom: '1px solid #e5e7eb', backgroundColor: index % 2 === 0 ? 'white' : '#f9fafb' }}>
+                          <td style={{ padding: '0.75rem', textAlign: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              disabled={!isEligible}
+                              onChange={() => handleToggleService(service.id, isEligible)}
+                              style={{ width: '16px', height: '16px', cursor: isEligible ? 'pointer' : 'not-allowed' }}
+                            />
+                          </td>
+                          <td style={{ padding: '0.75rem', color: '#1f2937', fontWeight: '500' }}>{service.service_name || '-'}</td>
+                          <td style={{ padding: '0.75rem', textAlign: 'center', color: '#374151' }}>{service.cycle_name || '-'}</td>
+                          <td style={{ padding: '0.75rem', textAlign: 'center', color: '#1f2937', fontWeight: '600' }}>
+                            {service.bill_followup || 0}/{service.cycle_terms || '-'}
+                          </td>
+                          <td style={{ padding: '0.75rem', textAlign: 'center', color: '#374151' }}>
+                            {formatDate(service.bill_from_date)} to {formatDate(service.bill_to_date)}
+                          </td>
+                          <td style={{ padding: '0.75rem', textAlign: 'center', color: '#1f2937', fontWeight: '600' }}>
+                            {isDateEditable ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                                <input
+                                  type="date"
+                                  value={customPeriods[String(service.id)]?.next_from_date || ''}
+                                  onChange={(e) => handlePeriodChange(service.id, 'next_from_date', e.target.value)}
+                                  style={{
+                                    width: '140px',
+                                    padding: '0.35rem',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '0.35rem',
+                                    fontSize: '0.78rem',
+                                  }}
+                                />
+                                <input
+                                  type="date"
+                                  value={customPeriods[String(service.id)]?.next_to_date || ''}
+                                  onChange={(e) => handlePeriodChange(service.id, 'next_to_date', e.target.value)}
+                                  style={{
+                                    width: '140px',
+                                    padding: '0.35rem',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '0.35rem',
+                                    fontSize: '0.78rem',
+                                  }}
+                                />
+                              </div>
+                            ) : (
+                              <div>
+                                <div>{formatDate(service.next_from_date)} to {formatDate(service.next_to_date)}</div>
+                                <div style={{ fontSize: '0.72rem', color: '#6b7280', marginTop: '0.2rem' }}>
+                                  {isYearly ? 'Yearly service date not editable' : (isEligible ? 'Date locked' : 'Editable when eligible')}
+                                </div>
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ padding: '0.75rem', textAlign: 'right', color: '#059669', fontWeight: '600' }}>
+                            {formatCurrency(service.inv_total_amount)}
+                          </td>
+                          <td style={{ padding: '0.75rem', color: isEligible ? '#059669' : '#6b7280', fontSize: '0.8rem' }}>
+                            {service.eligibility_reason}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div
+            style={{
+              backgroundColor: '#f9fafb',
+              padding: '1rem',
+              borderRadius: '0.5rem',
+              border: '1px solid #e5e7eb',
+              marginTop: '1rem',
+            }}
+          >
+            <h3 style={{ fontSize: '1rem', fontWeight: '600', color: '#1f2937', margin: '0 0 0.75rem 0' }}>
+              Previous Proforma Details
+            </h3>
+            {previousDetails.length === 0 ? (
+              <div style={{ color: '#6b7280', fontSize: '0.875rem' }}>No previous proforma details found.</div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb' }}>
+                      <th style={{ padding: '0.75rem', textAlign: 'left' }}>Proforma No</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'left' }}>Service</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'right' }}>Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previousDetails.map((row, index) => (
+                      <tr key={`prev-${index}`} style={{ borderBottom: '1px solid #e5e7eb' }}>
+                        <td style={{ padding: '0.75rem', color: '#374151', fontWeight: '500' }}>{row.invoice_no || '-'}</td>
+                        <td style={{ padding: '0.75rem', color: '#1f2937' }}>{row.service_name || '-'}</td>
+                        <td style={{ padding: '0.75rem', textAlign: 'right', color: '#059669', fontWeight: '600' }}>
+                          {formatCurrency(row.inv_total_amount)}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -450,53 +443,26 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
             )}
           </div>
 
-          {/* Action Buttons */}
-          <div style={{
-            display: 'flex',
-            justifyContent: 'center',
-            gap: '1rem',
-            paddingTop: '1rem',
-            borderTop: '1px solid #e5e7eb'
-          }}>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', paddingTop: '1rem', borderTop: '1px solid #e5e7eb', marginTop: '1rem' }}>
             <button
               onClick={() => setShowConfirmDialog(true)}
+              disabled={selectedServiceIds.length === 0}
               style={{
                 padding: '0.75rem 1.5rem',
-                backgroundColor: '#059669',
+                backgroundColor: selectedServiceIds.length === 0 ? '#9ca3af' : '#059669',
                 color: 'white',
                 border: 'none',
                 borderRadius: '0.5rem',
-                cursor: 'pointer',
+                cursor: selectedServiceIds.length === 0 ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '0.5rem',
                 fontSize: '0.875rem',
                 fontWeight: '600',
-                transition: 'background-color 0.2s'
               }}
             >
               <Plus size={16} />
-              Create Next Bill
-            </button>
-            <button
-              onClick={() => window.print()}
-              style={{
-                padding: '0.75rem 1.5rem',
-                backgroundColor: '#3b82f6',
-                color: 'white',
-                border: 'none',
-                borderRadius: '0.5rem',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                fontSize: '0.875rem',
-                fontWeight: '600',
-                transition: 'background-color 0.2s'
-              }}
-            >
-              <Printer size={16} />
-              Print Details
+              Create Recurring Invoice
             </button>
             <button
               onClick={onClose}
@@ -512,7 +478,6 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                 gap: '0.5rem',
                 fontSize: '0.875rem',
                 fontWeight: '600',
-                transition: 'background-color 0.2s'
               }}
             >
               <X size={16} />
@@ -522,96 +487,57 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
         </div>
       </div>
 
-      {/* Confirmation Dialog */}
       {showConfirmDialog && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.5)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1001,
-          padding: '1rem'
-        }}>
-          <div style={{
-            backgroundColor: 'white',
-            borderRadius: '0.75rem',
-            padding: '2rem',
-            maxWidth: '500px',
-            width: '100%',
-            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
-          }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '1rem',
-              marginBottom: '1.5rem'
-            }}>
-              <div style={{
-                padding: '0.75rem',
-                backgroundColor: '#fef3c7',
-                borderRadius: '50%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}>
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1001,
+            padding: '1rem',
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: 'white',
+              borderRadius: '0.75rem',
+              padding: '2rem',
+              maxWidth: '500px',
+              width: '100%',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem' }}>
+              <div
+                style={{
+                  padding: '0.75rem',
+                  backgroundColor: '#fef3c7',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
                 <AlertTriangle size={24} color="#d97706" />
               </div>
               <div>
-                <h3 style={{
-                  fontSize: '1.25rem',
-                  fontWeight: '700',
-                  color: '#1f2937',
-                  margin: '0 0 0.25rem 0'
-                }}>
-                  Create Next Recurring Invoice
+                <h3 style={{ fontSize: '1.25rem', fontWeight: '700', color: '#1f2937', margin: '0 0 0.25rem 0' }}>
+                  Create Recurring Invoice
                 </h3>
-                <p style={{
-                  fontSize: '0.875rem',
-                  color: '#6b7280',
-                  margin: 0
-                }}>
-                  This will create a new recurring invoice based on the current one
+                <p style={{ fontSize: '0.875rem', color: '#6b7280', margin: 0 }}>
+                  {selectedServiceIds.length} service(s) will be included
                 </p>
               </div>
             </div>
 
-            <div style={{
-              backgroundColor: '#f9fafb',
-              padding: '1rem',
-              borderRadius: '0.5rem',
-              marginBottom: '1.5rem'
-            }}>
-              <p style={{
-                fontSize: '0.875rem',
-                color: '#374151',
-                margin: '0 0 0.5rem 0',
-                fontWeight: '500'
-              }}>
-                Current Invoice: {recurringInvoice.pi_number}
-              </p>
-              <p style={{
-                fontSize: '0.875rem',
-                color: '#6b7280',
-                margin: 0
-              }}>
-                A new proforma invoice will be created with updated dates and incremented followup number.
-              </p>
-            </div>
-
-            {/* Date Selection */}
             <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{
-                display: 'block',
-                fontSize: '0.875rem',
-                fontWeight: '500',
-                color: '#374151',
-                marginBottom: '0.5rem'
-              }}>
+              <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: '0.5rem' }}>
                 Proforma Invoice Date <span style={{ color: '#dc2626' }}>*</span>
               </label>
               <input
@@ -625,18 +551,11 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                   border: '1px solid #d1d5db',
                   borderRadius: '0.5rem',
                   fontSize: '0.875rem',
-                  backgroundColor: 'white',
-                  outline: 'none',
-                  cursor: 'pointer'
                 }}
               />
             </div>
 
-            <div style={{
-              display: 'flex',
-              justifyContent: 'flex-end',
-              gap: '1rem'
-            }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem' }}>
               <button
                 onClick={() => setShowConfirmDialog(false)}
                 disabled={isCreating}
@@ -649,47 +568,28 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                   cursor: isCreating ? 'not-allowed' : 'pointer',
                   fontSize: '0.875rem',
                   fontWeight: '600',
-                  opacity: isCreating ? 0.5 : 1
                 }}
               >
                 Cancel
               </button>
               <button
-                onClick={handleCreateNextBill}
-                disabled={isCreating || !nextBillDate}
+                onClick={handleCreateRecurringInvoice}
+                disabled={isCreating || !nextBillDate || selectedServiceIds.length === 0}
                 style={{
                   padding: '0.75rem 1.5rem',
-                  backgroundColor: (isCreating || !nextBillDate) ? '#9ca3af' : '#059669',
+                  backgroundColor: (isCreating || !nextBillDate || selectedServiceIds.length === 0) ? '#9ca3af' : '#059669',
                   color: 'white',
                   border: 'none',
                   borderRadius: '0.5rem',
-                  cursor: (isCreating || !nextBillDate) ? 'not-allowed' : 'pointer',
+                  cursor: (isCreating || !nextBillDate || selectedServiceIds.length === 0) ? 'not-allowed' : 'pointer',
                   fontSize: '0.875rem',
                   fontWeight: '600',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '0.5rem',
-                  opacity: (isCreating || !nextBillDate) ? 0.5 : 1
                 }}
               >
-                {isCreating ? (
-                  <>
-                    <div style={{
-                      width: '16px',
-                      height: '16px',
-                      border: '2px solid #ffffff40',
-                      borderTop: '2px solid #ffffff',
-                      borderRadius: '50%',
-                      animation: 'spin 1s linear infinite'
-                    }}></div>
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <Plus size={16} />
-                    Create Next Bill
-                  </>
-                )}
+                {isCreating ? 'Creating...' : 'Create'}
               </button>
             </div>
           </div>
@@ -700,4 +600,3 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
 };
 
 export default RecurringInvoiceView;
-

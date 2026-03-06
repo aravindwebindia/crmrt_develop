@@ -347,6 +347,16 @@ const RecurringInvoice = () => {
                         Total Amount {getSortIcon('grand_total')}
                       </div>
                     </th>
+                    <th style={{ 
+                      padding: '1rem 0.75rem', 
+                      textAlign: 'left', 
+                      fontSize: '0.875rem', 
+                      fontWeight: '600', 
+                      color: '#374151',
+                      borderBottom: '1px solid #e5e7eb'
+                    }}>
+                      Due Status
+                    </th>
                    
                     <th style={{ 
                       padding: '1rem 0.75rem', 
@@ -363,7 +373,7 @@ const RecurringInvoice = () => {
                 <tbody>
                   {loading ? (
                     <tr key="loading">
-                      <td colSpan="9" style={{ padding: '3rem', textAlign: 'center', color: '#6b7280' }}>
+                      <td colSpan="8" style={{ padding: '3rem', textAlign: 'center', color: '#6b7280' }}>
                         <div style={{ textAlign: 'center' }}>
                           <div style={{ 
                             width: '2rem', 
@@ -380,21 +390,21 @@ const RecurringInvoice = () => {
                     </tr>
                   ) : recurringInvoices.length === 0 ? (
                     <tr key="empty">
-                      <td colSpan="9" style={{ padding: '3rem', textAlign: 'center', color: '#6b7280' }}>
+                      <td colSpan="8" style={{ padding: '3rem', textAlign: 'center', color: '#6b7280' }}>
                         <div style={{ textAlign: 'center' }}>
                           <Clock size={48} style={{ marginBottom: '1rem', opacity: 0.5 }} />
                           <h3 style={{ fontSize: '1.125rem', fontWeight: '500', margin: '0 0 0.5rem 0' }}>
                             No recurring invoices found
                           </h3>
                           <p style={{ fontSize: '0.875rem', margin: 0 }}>
-                            No recurring invoices are due within the next 30 days.
+                            No active recurring invoice records found.
                           </p>
                         </div>
                       </td>
                     </tr>
                   ) : (
                     recurringInvoices.map((recurringInvoice, index) => (
-                      <tr key={recurringInvoice.id} style={{ 
+                      <tr key={recurringInvoice.invoice_id} style={{ 
                         borderBottom: '1px solid #f3f4f6',
                         transition: 'background-color 0.2s'
                       }}>
@@ -420,7 +430,12 @@ const RecurringInvoice = () => {
                         </td>
                         <td style={{ padding: '0.75rem 0.5rem' }}>
                           <div style={{ color: '#6b7280' }}>
-                            {formatDate(recurringInvoice.bill_to_date_plus_one)}
+                            {formatDate(recurringInvoice.next_due_date)}
+                          </div>
+                        </td>
+                        <td style={{ padding: '0.75rem 0.5rem' }}>
+                          <div style={{ fontWeight: '600', color: '#059669' }}>
+                            {formatCurrency(recurringInvoice.grand_total)}
                           </div>
                         </td>
                         <td style={{ padding: '0.75rem 0.5rem' }}>
@@ -638,4 +653,3 @@ const RecurringInvoice = () => {
 };
 
 export default RecurringInvoice;
-
