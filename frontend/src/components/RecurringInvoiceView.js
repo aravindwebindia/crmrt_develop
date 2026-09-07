@@ -11,10 +11,12 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
   const [previousDetails, setPreviousDetails] = useState([]);
   const [loadingServices, setLoadingServices] = useState(false);
   const [selectedServiceIds, setSelectedServiceIds] = useState([]);
+  const [closedServiceIds, setClosedServiceIds] = useState([]);
   const [customPeriods, setCustomPeriods] = useState({});
 
   useEffect(() => {
     setSelectedServiceIds([]);
+    setClosedServiceIds([]);
     setNextBillDate('');
     setCustomPeriods({});
   }, [recurringInvoice?.invoice_id, isOpen]);
@@ -49,6 +51,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
         setServiceDetails([]);
         setPreviousDetails([]);
         setSelectedServiceIds([]);
+        setClosedServiceIds([]);
         toast.error('Failed to fetch recurring service details');
       } finally {
         setLoadingServices(false);
@@ -104,18 +107,26 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
 
   const handleToggleService = (serviceId, enabled) => {
     if (!enabled) return;
+    setClosedServiceIds((prev) => prev.filter((id) => id !== serviceId));
     setSelectedServiceIds((prev) =>
       prev.includes(serviceId) ? prev.filter((id) => id !== serviceId) : [...prev, serviceId]
     );
   };
 
+  const handleToggleServiceClose = (serviceId) => {
+    setSelectedServiceIds((prev) => prev.filter((id) => id !== serviceId));
+    setClosedServiceIds((prev) =>
+      prev.includes(serviceId) ? prev.filter((id) => id !== serviceId) : [...prev, serviceId]
+    );
+  };
+
   const handleCreateRecurringInvoice = async () => {
-    if (!nextBillDate) {
+    if (selectedServiceIds.length > 0 && !nextBillDate) {
       toast.error('Please select proforma invoice date');
       return;
     }
-    if (selectedServiceIds.length === 0) {
-      toast.error('Please select at least one eligible service');
+    if (selectedServiceIds.length === 0 && closedServiceIds.length === 0) {
+      toast.error('Please select at least one service');
       return;
     }
 
@@ -125,11 +136,16 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
         invoice_id: recurringInvoice.invoice_id,
         inv_date: nextBillDate,
         selected_detail_ids: selectedServiceIds,
+        service_close_ids: closedServiceIds,
         custom_periods: customPeriods,
       });
 
       if (response.data.success) {
-        toast.success(`Recurring invoice created: ${response.data.data.new_invoice_number}`);
+        if (response.data.data?.new_invoice_number) {
+          toast.success(`Recurring invoice created: ${response.data.data.new_invoice_number}`);
+        } else {
+          toast.success('Service close updated successfully');
+        }
         setShowConfirmDialog(false);
         setNextBillDate('');
         onClose();
@@ -289,6 +305,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                 <div style={{ marginBottom: '0.4rem' }}>Checkbox enabled from 30 days before next period start.</div>
                 <div>Eligible: <strong>{eligibleCount}</strong></div>
                 <div>Selected: <strong>{selectedServiceIds.length}</strong></div>
+                <div>Service Close: <strong>{closedServiceIds.length}</strong></div>
               </div>
             </div>
           </div>
@@ -324,6 +341,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                       <th style={{ padding: '0.75rem', textAlign: 'center' }}>Next Period</th>
                       <th style={{ padding: '0.75rem', textAlign: 'right' }}>Amount</th>
                       <th style={{ padding: '0.75rem', textAlign: 'left' }}>Status</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'center' }}>Service Close</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -332,6 +350,7 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                       const isYearly = Number(service.is_yearly) === 1;
                       const isDateEditable = Number(service.is_date_editable) === 1;
                       const isSelected = selectedServiceIds.includes(service.id);
+                      const isClosed = closedServiceIds.includes(service.id);
                       return (
                         <tr key={service.id} style={{ borderBottom: '1px solid #e5e7eb', backgroundColor: index % 2 === 0 ? 'white' : '#f9fafb' }}>
                           <td style={{ padding: '0.75rem', textAlign: 'center' }}>
@@ -394,6 +413,14 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                           <td style={{ padding: '0.75rem', color: isEligible ? '#059669' : '#6b7280', fontSize: '0.8rem' }}>
                             {service.eligibility_reason}
                           </td>
+                          <td style={{ padding: '0.75rem', textAlign: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={isClosed}
+                              onChange={() => handleToggleServiceClose(service.id)}
+                              style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                            />
+                          </td>
                         </tr>
                       );
                     })}
@@ -446,14 +473,14 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
           <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', paddingTop: '1rem', borderTop: '1px solid #e5e7eb', marginTop: '1rem' }}>
             <button
               onClick={() => setShowConfirmDialog(true)}
-              disabled={selectedServiceIds.length === 0}
+              disabled={selectedServiceIds.length === 0 && closedServiceIds.length === 0}
               style={{
                 padding: '0.75rem 1.5rem',
-                backgroundColor: selectedServiceIds.length === 0 ? '#9ca3af' : '#059669',
+                backgroundColor: (selectedServiceIds.length === 0 && closedServiceIds.length === 0) ? '#9ca3af' : '#059669',
                 color: 'white',
                 border: 'none',
                 borderRadius: '0.5rem',
-                cursor: selectedServiceIds.length === 0 ? 'not-allowed' : 'pointer',
+                cursor: (selectedServiceIds.length === 0 && closedServiceIds.length === 0) ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '0.5rem',
@@ -531,12 +558,12 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                   Create Recurring Invoice
                 </h3>
                 <p style={{ fontSize: '0.875rem', color: '#6b7280', margin: 0 }}>
-                  {selectedServiceIds.length} service(s) will be included
+                  {selectedServiceIds.length} create, {closedServiceIds.length} close
                 </p>
               </div>
             </div>
 
-            <div style={{ marginBottom: '1.5rem' }}>
+            <div style={{ marginBottom: '1.5rem', opacity: selectedServiceIds.length > 0 ? 1 : 0.6 }}>
               <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '500', color: '#374151', marginBottom: '0.5rem' }}>
                 Proforma Invoice Date <span style={{ color: '#dc2626' }}>*</span>
               </label>
@@ -544,7 +571,8 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
                 type="date"
                 value={nextBillDate}
                 onChange={(e) => setNextBillDate(e.target.value)}
-                required
+                required={selectedServiceIds.length > 0}
+                disabled={selectedServiceIds.length === 0}
                 style={{
                   width: '100%',
                   padding: '0.75rem',
@@ -574,14 +602,14 @@ const RecurringInvoiceView = ({ isOpen, onClose, recurringInvoice, onNextBillCre
               </button>
               <button
                 onClick={handleCreateRecurringInvoice}
-                disabled={isCreating || !nextBillDate || selectedServiceIds.length === 0}
+                disabled={isCreating || (selectedServiceIds.length > 0 && !nextBillDate) || (selectedServiceIds.length === 0 && closedServiceIds.length === 0)}
                 style={{
                   padding: '0.75rem 1.5rem',
-                  backgroundColor: (isCreating || !nextBillDate || selectedServiceIds.length === 0) ? '#9ca3af' : '#059669',
+                  backgroundColor: (isCreating || (selectedServiceIds.length > 0 && !nextBillDate) || (selectedServiceIds.length === 0 && closedServiceIds.length === 0)) ? '#9ca3af' : '#059669',
                   color: 'white',
                   border: 'none',
                   borderRadius: '0.5rem',
-                  cursor: (isCreating || !nextBillDate || selectedServiceIds.length === 0) ? 'not-allowed' : 'pointer',
+                  cursor: (isCreating || (selectedServiceIds.length > 0 && !nextBillDate) || (selectedServiceIds.length === 0 && closedServiceIds.length === 0)) ? 'not-allowed' : 'pointer',
                   fontSize: '0.875rem',
                   fontWeight: '600',
                   display: 'flex',

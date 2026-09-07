@@ -302,6 +302,7 @@ try {
         $input = json_decode(file_get_contents('php://input'), true);
         $invoice_id = isset($input['invoice_id']) ? intval($input['invoice_id']) : 0;
         $selected_detail_ids = isset($input['selected_detail_ids']) && is_array($input['selected_detail_ids']) ? $input['selected_detail_ids'] : [];
+        $service_close_ids = isset($input['service_close_ids']) && is_array($input['service_close_ids']) ? $input['service_close_ids'] : [];
         $custom_periods = isset($input['custom_periods']) && is_array($input['custom_periods']) ? $input['custom_periods'] : [];
         $inv_date = $input['inv_date'] ?? null;
         $today = new DateTime(date('Y-m-d'));
@@ -311,22 +312,28 @@ try {
             echo json_encode(['success' => false, 'message' => 'Invoice ID is required']);
             exit;
         }
-        if (empty($selected_detail_ids)) {
+
+        $selectedIds = array_values(array_unique(array_map('intval', $selected_detail_ids)));
+        $selectedIds = array_values(array_filter($selectedIds, function($id) { return $id > 0; }));
+        $closeIds = array_values(array_unique(array_map('intval', $service_close_ids)));
+        $closeIds = array_values(array_filter($closeIds, function($id) { return $id > 0; }));
+
+        if (empty($selectedIds) && empty($closeIds)) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => 'Please select at least one eligible service']);
+            echo json_encode(['success' => false, 'message' => 'Please select at least one service to create or close']);
             exit;
         }
-        if (!$inv_date || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $inv_date)) {
+
+        if (!empty($selectedIds) && (!$inv_date || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $inv_date))) {
             http_response_code(400);
             echo json_encode(['success' => false, 'message' => 'Invalid inv_date format. Please use YYYY-MM-DD']);
             exit;
         }
 
-        $selectedIds = array_values(array_unique(array_map('intval', $selected_detail_ids)));
-        $selectedIds = array_filter($selectedIds, function($id) { return $id > 0; });
-        if (empty($selectedIds)) {
+        $intersection = array_values(array_intersect($selectedIds, $closeIds));
+        if (!empty($intersection)) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => 'Invalid selected service IDs']);
+            echo json_encode(['success' => false, 'message' => 'A service cannot be selected for create and close at the same time']);
             exit;
         }
 
@@ -340,60 +347,98 @@ try {
             exit;
         }
 
-        $placeholders = implode(',', array_fill(0, count($selectedIds), '?'));
-        $detailQuery = "SELECT
-                            pid.*,
-                            pi.sale_order_id,
-                            pi.contact_id,
-                            pi.bc_id,
-                            bc.cycle_name,
-                            bc.month_terms,
-                            bc.cycle_terms
-                        FROM proforma_invoice_details pid
-                        INNER JOIN proforma_invoices pi ON pid.p_inv_id = pi.id
-                        LEFT JOIN bill_cycles bc ON pid.bill_cycle_id = bc.id
-                        WHERE pi.sale_order_id = ?
-                          AND pid.status = 'invoiced'
-                          AND pid.id IN ($placeholders)
-                        ORDER BY pid.id ASC";
+        $selectedDetails = [];
+        if (!empty($selectedIds)) {
+            $placeholders = implode(',', array_fill(0, count($selectedIds), '?'));
+            $detailQuery = "SELECT
+                                pid.*,
+                                pi.sale_order_id,
+                                pi.contact_id,
+                                pi.bc_id,
+                                bc.cycle_name,
+                                bc.month_terms,
+                                bc.cycle_terms
+                            FROM proforma_invoice_details pid
+                            INNER JOIN proforma_invoices pi ON pid.p_inv_id = pi.id
+                            LEFT JOIN bill_cycles bc ON pid.bill_cycle_id = bc.id
+                            WHERE pi.sale_order_id = ?
+                              AND pid.status = 'invoiced'
+                              AND pid.id IN ($placeholders)
+                            ORDER BY pid.id ASC";
+            $detailParams = array_merge([$saleOrderId], $selectedIds);
+            $detailStmt = $pdo->prepare($detailQuery);
+            $detailStmt->execute($detailParams);
+            $selectedDetails = $detailStmt->fetchAll(PDO::FETCH_ASSOC);
 
-        $detailParams = array_merge([$saleOrderId], $selectedIds);
-        $detailStmt = $pdo->prepare($detailQuery);
-        $detailStmt->execute($detailParams);
-        $details = $detailStmt->fetchAll(PDO::FETCH_ASSOC);
-
-        if (count($details) !== count($selectedIds)) {
-            http_response_code(400);
-            echo json_encode(['success' => false, 'message' => 'Some selected services are invalid or not invoice-ready']);
-            exit;
-        }
-
-        // If any selected service already reached followup limit, mark it completed and stop creation.
-        $alreadyCompletedIds = [];
-        foreach ($details as $detail) {
-            $cycleTerms = intval($detail['cycle_terms'] ?? 0);
-            $followup = intval($detail['bill_followup'] ?? 0);
-            if ($cycleTerms > 0 && $followup >= $cycleTerms) {
-                $alreadyCompletedIds[] = intval($detail['id']);
+            if (count($selectedDetails) !== count($selectedIds)) {
+                http_response_code(400);
+                echo json_encode(['success' => false, 'message' => 'Some selected services are invalid or not invoice-ready']);
+                exit;
             }
         }
-        if (!empty($alreadyCompletedIds)) {
-            $completedPlaceholders = implode(',', array_fill(0, count($alreadyCompletedIds), '?'));
-            $completeStmt = $pdo->prepare("UPDATE proforma_invoice_details SET status = 'completed' WHERE id IN ($completedPlaceholders)");
-            $completeStmt->execute($alreadyCompletedIds);
 
-            http_response_code(400);
-            echo json_encode([
-                'success' => false,
-                'message' => 'Some selected services already reached cycle terms and were marked completed. Please refresh and try again.'
-            ]);
-            exit;
+        $closeDetails = [];
+        if (!empty($closeIds)) {
+            $closePlaceholders = implode(',', array_fill(0, count($closeIds), '?'));
+            $closeQuery = "SELECT pid.id
+                           FROM proforma_invoice_details pid
+                           INNER JOIN proforma_invoices pi ON pid.p_inv_id = pi.id
+                           WHERE pi.sale_order_id = ?
+                             AND pid.status = 'invoiced'
+                             AND pid.id IN ($closePlaceholders)";
+            $closeParams = array_merge([$saleOrderId], $closeIds);
+            $closeStmt = $pdo->prepare($closeQuery);
+            $closeStmt->execute($closeParams);
+            $closeDetails = $closeStmt->fetchAll(PDO::FETCH_ASSOC);
+
+            if (count($closeDetails) !== count($closeIds)) {
+                http_response_code(400);
+                echo json_encode(['success' => false, 'message' => 'Some close services are invalid or not invoice-ready']);
+                exit;
+            }
         }
 
-        $first = $details[0];
         $pdo->beginTransaction();
-
         try {
+            $closedCount = 0;
+            if (!empty($closeDetails)) {
+                $closeUpdateStmt = $pdo->prepare("UPDATE proforma_invoice_details SET status = 'closed' WHERE id = ?");
+                foreach ($closeDetails as $closeDetail) {
+                    $closeUpdateStmt->execute([intval($closeDetail['id'])]);
+                    $closedCount++;
+                }
+            }
+
+            if (empty($selectedDetails)) {
+                $pdo->commit();
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Service close updated successfully',
+                    'data' => [
+                        'closed_count' => $closedCount
+                    ]
+                ]);
+                exit;
+            }
+
+            // If any selected service already reached followup limit, mark it completed and stop creation.
+            $alreadyCompletedIds = [];
+            foreach ($selectedDetails as $detail) {
+                $cycleTerms = intval($detail['cycle_terms'] ?? 0);
+                $followup = intval($detail['bill_followup'] ?? 0);
+                if ($cycleTerms > 0 && $followup >= $cycleTerms) {
+                    $alreadyCompletedIds[] = intval($detail['id']);
+                }
+            }
+            if (!empty($alreadyCompletedIds)) {
+                $completeStmt = $pdo->prepare("UPDATE proforma_invoice_details SET status = 'completed' WHERE id = ?");
+                foreach ($alreadyCompletedIds as $completedId) {
+                    $completeStmt->execute([$completedId]);
+                }
+                throw new Exception('Some selected services already reached cycle terms and were marked completed. Please refresh and try again.');
+            }
+
+            $first = $selectedDetails[0];
             $bcStmt = $pdo->prepare("SELECT bc_prefix FROM bill_company WHERE bc_id = ?");
             $bcStmt->execute([$first['bc_id']]);
             $bcPrefix = $bcStmt->fetch(PDO::FETCH_ASSOC)['bc_prefix'] ?? 'XX';
@@ -409,7 +454,7 @@ try {
 
             $subTotal = 0.0;
             $grandTotal = 0.0;
-            foreach ($details as $detail) {
+            foreach ($selectedDetails as $detail) {
                 $subTotal += floatval($detail['inv_bill_amount']);
                 $grandTotal += floatval($detail['inv_total_amount']);
             }
@@ -438,7 +483,7 @@ try {
 
             $updateOldStmt = $pdo->prepare("UPDATE proforma_invoice_details SET status = 'followed' WHERE id = ?");
 
-            foreach ($details as $detail) {
+            foreach ($selectedDetails as $detail) {
                 $period = calculateNextPeriod($detail);
                 $detailIdKey = strval($detail['id']);
                 $isYearly = isYearlyService($detail);
@@ -465,7 +510,7 @@ try {
                 $nextFromDate = DateTime::createFromFormat('Y-m-d', $period['next_from_date']);
                 $eligibilityOpenDate = clone $nextFromDate;
                 $eligibilityOpenDate->sub(new DateInterval('P30D'));
-                $isEligible = $isOneTime ? true : ($today >= $eligibilityOpenDate);
+                $isEligible = $isOneTime ? false : ($today >= $eligibilityOpenDate);
                 $isDateEditable = $isEligible && !$isYearly;
 
                 if ($isDateEditable && isset($custom_periods[$detailIdKey]) && is_array($custom_periods[$detailIdKey])) {
@@ -525,7 +570,8 @@ try {
                 'data' => [
                     'new_invoice_id' => $newInvoiceId,
                     'new_invoice_number' => $newInvoiceNumber,
-                    'service_count' => count($details),
+                    'service_count' => count($selectedDetails),
+                    'closed_count' => $closedCount,
                     'sub_total' => $subTotal,
                     'grand_total' => $grandTotal
                 ]
@@ -533,7 +579,9 @@ try {
             exit;
         } catch (Exception $e) {
             $pdo->rollBack();
-            throw $e;
+            http_response_code(400);
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+            exit;
         }
     }
 
