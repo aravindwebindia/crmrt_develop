@@ -413,13 +413,16 @@ try {
         try {
             // Get proforma invoice details to check conditions
             $proformaQuery = "SELECT pi.*, so.id as sale_order_id, so.contact_id, so.bc_id,
-                                    (SELECT COUNT(*) FROM proforma_invoices pi2 
-                                     WHERE pi2.sale_order_id = pi.sale_order_id 
-                                     AND pi2.is_deleted = 0) as total_invoices_for_sale_order
+                                    (SELECT COUNT(*) FROM proforma_invoices pi2
+                                     WHERE pi2.sale_order_id = pi.sale_order_id
+                                     AND pi2.is_deleted = 0) as total_invoices_for_sale_order,
+                                    (SELECT MAX(pi3.id) FROM proforma_invoices pi3
+                                     WHERE pi3.sale_order_id = pi.sale_order_id
+                                     AND pi3.is_deleted = 0) as latest_invoice_id_for_sale_order
                             FROM proforma_invoices pi
                             LEFT JOIN sale_orders so ON pi.sale_order_id = so.id
                             WHERE pi.id = :id AND pi.is_deleted = 0";
-            
+
             $proformaStmt = $pdo->prepare($proformaQuery);
             $proformaStmt->execute(['id' => $id]);
             $proformaInvoice = $proformaStmt->fetch(PDO::FETCH_ASSOC);
@@ -433,47 +436,85 @@ try {
                 throw new Exception('Cannot delete proforma invoice that has been invoiced (tax invoice number exists)');
             }
 
-            // Check if this is the first invoice for the sale order
-            if ($proformaInvoice['total_invoices_for_sale_order'] > 1) {
-                throw new Exception('Cannot delete proforma invoice. Multiple invoices exist for this sale order');
+            // Only the most recent proforma invoice for the sale order can be deleted.
+            // This keeps the recurring chain intact: deleting a wrongly generated invoice
+            // must never remove/modify the parent recurring configuration, and must not
+            // strand an older invoice that has already been superseded.
+            $isFirstInvoice = intval($proformaInvoice['total_invoices_for_sale_order']) <= 1;
+            if (intval($proformaInvoice['latest_invoice_id_for_sale_order']) !== $id) {
+                throw new Exception('Cannot delete this proforma invoice. A newer proforma invoice already exists for this sale order; only the most recently generated proforma invoice can be deleted.');
             }
 
+            // Get this invoice's line items so the recurring chain can be restored
+            $ownDetailsQuery = "SELECT id, sale_order_detail_id FROM proforma_invoice_details
+                            WHERE p_inv_id = :proforma_invoice_id";
+            $ownDetailsStmt = $pdo->prepare($ownDetailsQuery);
+            $ownDetailsStmt->execute(['proforma_invoice_id' => $id]);
+            $ownDetails = $ownDetailsStmt->fetchAll(PDO::FETCH_ASSOC);
+
             // Soft delete proforma invoice
-            $deleteProformaQuery = "UPDATE proforma_invoices 
-                                   SET is_deleted = 1, updated_at = NOW() 
+            $deleteProformaQuery = "UPDATE proforma_invoices
+                                   SET is_deleted = 1, updated_at = NOW()
                                    WHERE id = :id";
             $deleteProformaStmt = $pdo->prepare($deleteProformaQuery);
             $deleteProformaStmt->execute(['id' => $id]);
 
-            // Get sale_order_detail_ids from proforma_invoice_details
-            $detailsQuery = "SELECT sale_order_detail_id FROM proforma_invoice_details 
-                            WHERE p_inv_id = :proforma_invoice_id";
-            $detailsStmt = $pdo->prepare($detailsQuery);
-            $detailsStmt->execute(['proforma_invoice_id' => $id]);
-            $saleOrderDetailIds = $detailsStmt->fetchAll(PDO::FETCH_COLUMN);
+            if ($isFirstInvoice) {
+                // No prior invoice exists yet, so simply reopen the sale order for a
+                // fresh initial proforma invoice (existing behavior, unchanged).
+                $saleOrderDetailIds = array_column($ownDetails, 'sale_order_detail_id');
+                if (!empty($saleOrderDetailIds)) {
+                    $placeholders = str_repeat('?,', count($saleOrderDetailIds) - 1) . '?';
+                    $updateDetailsQuery = "UPDATE sale_order_details
+                                          SET is_invoiced = 0, updated_at = NOW()
+                                          WHERE id IN ($placeholders)";
+                    $updateDetailsStmt = $pdo->prepare($updateDetailsQuery);
+                    $updateDetailsStmt->execute($saleOrderDetailIds);
 
-            if (!empty($saleOrderDetailIds)) {
-                // Update sale_order_details.is_invoiced = 0
-                $placeholders = str_repeat('?,', count($saleOrderDetailIds) - 1) . '?';
-                $updateDetailsQuery = "UPDATE sale_order_details 
-                                      SET is_invoiced = 0, updated_at = NOW() 
-                                      WHERE id IN ($placeholders)";
-                $updateDetailsStmt = $pdo->prepare($updateDetailsQuery);
-                $updateDetailsStmt->execute($saleOrderDetailIds);
+                    $updateSaleOrderQuery = "UPDATE sale_orders
+                                            SET is_invoiced = 0, updated_at = NOW()
+                                            WHERE id = :sale_order_id";
+                    $updateSaleOrderStmt = $pdo->prepare($updateSaleOrderQuery);
+                    $updateSaleOrderStmt->execute(['sale_order_id' => $proformaInvoice['sale_order_id']]);
+                }
+            } else {
+                // A prior invoice in the recurring chain exists for this sale order.
+                // Revert each service line's previous ("followed") record back to
+                // "invoiced" so the existing recurring/duplicate-prevention logic
+                // picks it up again for the next generation, exactly as if this
+                // invoice had never been generated. Sale order invoiced flags are
+                // left untouched since the sale order was already correctly marked
+                // invoiced by the earlier cycle.
+                $revertPredecessorStmt = $pdo->prepare("UPDATE proforma_invoice_details
+                    SET status = 'invoiced'
+                    WHERE sale_order_detail_id = :sale_order_detail_id
+                      AND status = 'followed'
+                      AND id = (
+                          SELECT id FROM (
+                              SELECT MAX(id) as id FROM proforma_invoice_details
+                              WHERE sale_order_detail_id = :sale_order_detail_id2
+                                AND status = 'followed'
+                                AND id < :own_id
+                          ) as prev
+                      )");
 
-                // Update sale_orders.is_invoiced = 0
-                $updateSaleOrderQuery = "UPDATE sale_orders 
-                                        SET is_invoiced = 0, updated_at = NOW() 
-                                        WHERE id = :sale_order_id";
-                $updateSaleOrderStmt = $pdo->prepare($updateSaleOrderQuery);
-                $updateSaleOrderStmt->execute(['sale_order_id' => $proformaInvoice['sale_order_id']]);
+                foreach ($ownDetails as $ownDetail) {
+                    if (empty($ownDetail['sale_order_detail_id'])) {
+                        continue;
+                    }
+                    $revertPredecessorStmt->execute([
+                        'sale_order_detail_id' => $ownDetail['sale_order_detail_id'],
+                        'sale_order_detail_id2' => $ownDetail['sale_order_detail_id'],
+                        'own_id' => $ownDetail['id']
+                    ]);
+                }
             }
 
             $pdo->commit();
-            
+
             echo json_encode([
                 'success' => true,
-                'message' => 'Proforma invoice deleted successfully. Sale order is now available for new proforma invoice creation.'
+                'message' => 'Proforma invoice deleted successfully.' . ($isFirstInvoice ? ' Sale order is now available for new proforma invoice creation.' : ' Future recurring generation will continue from the prior invoice.')
             ]);
 
         } catch (Exception $e) {

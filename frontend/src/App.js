@@ -16,6 +16,7 @@ import SaleOrder from './components/SaleOrder';
 import ProformaInvoice from './components/ProformaInvoice';
 import RecurringInvoice from './components/RecurringInvoice';
 import Reports from './components/Reports';
+import ReminderSettings from './components/ReminderSettings';
 import ProtectedRoute from './components/ProtectedRoute';
 import LoadingSpinner from './components/LoadingSpinner';
 
@@ -122,9 +123,17 @@ function App() {
             </ProtectedRoute>
           } 
         />
-          <Route 
-            path="/bill-followup" 
-            element={<Navigate to="/recurring-invoice" replace />} 
+          <Route
+            path="/bill-followup"
+            element={<Navigate to="/recurring-invoice" replace />}
+          />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute requiredRole="admin">
+                <ReminderSettings />
+              </ProtectedRoute>
+            }
           />
           <Route 
             path="/" 

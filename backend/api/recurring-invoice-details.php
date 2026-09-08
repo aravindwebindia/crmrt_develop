@@ -57,16 +57,23 @@ function isOneTimeService(array $serviceRow) {
     return $monthTerms <= 0 || strpos($cycleName, 'one time') !== false || strpos($cycleName, 'onetime') !== false;
 }
 
+// Returns true for Yearly and Multi-Year cycles, both of which must be excluded
+// from recurring/proforma invoice generation (Half-Yearly is explicitly excluded
+// from this check since it also contains "year" in its name).
 function isYearlyService(array $serviceRow) {
     $cycleName = strtolower(trim($serviceRow['cycle_name'] ?? ''));
     $monthTerms = isset($serviceRow['month_terms']) ? intval($serviceRow['month_terms']) : 0;
     $cycleTerms = isset($serviceRow['cycle_terms']) ? intval($serviceRow['cycle_terms']) : 0;
 
-    if ($monthTerms === 12 || $cycleTerms === 1) {
+    if (strpos($cycleName, 'half') !== false) {
+        return false;
+    }
+
+    if ($monthTerms >= 12 || $cycleTerms === 1) {
         return true;
     }
 
-    return strpos($cycleName, 'yearly') !== false && strpos($cycleName, 'half') === false;
+    return strpos($cycleName, 'yearly') !== false || strpos($cycleName, 'multi') !== false;
 }
 
 try {
@@ -162,6 +169,7 @@ try {
                         LEFT JOIN bill_cycles bc2 ON pid2.bill_cycle_id = bc2.id
                         WHERE pid2.sale_order_detail_id = pid.sale_order_detail_id
                           AND pid2.status = 'invoiced'
+                          AND pi2.is_deleted = 0
                           AND (bc2.cycle_terms IS NULL OR pid2.bill_followup < bc2.cycle_terms)
                           AND pid2.id > pid.id
                     ) as has_newer_invoiced
@@ -179,6 +187,7 @@ try {
                       LEFT JOIN bill_cycles bcx ON pidx.bill_cycle_id = bcx.id
                       WHERE pix.sale_order_id = ?
                         AND pidx.status = 'invoiced'
+                        AND pix.is_deleted = 0
                         AND (bcx.cycle_terms IS NULL OR pidx.bill_followup < bcx.cycle_terms)
                       GROUP BY service_stream_key
                   ) latest_service ON latest_service.latest_id = pid.id
@@ -187,6 +196,7 @@ try {
                   LEFT JOIN services s ON pid.service_id = s.id
                   LEFT JOIN tax t ON pid.tax_id = t.tax_id
                   WHERE pid.status = 'invoiced'
+                    AND pi.is_deleted = 0
                     AND (bc.cycle_terms IS NULL OR pid.bill_followup < bc.cycle_terms)
                   ORDER BY pid.id ASC";
 
@@ -363,6 +373,7 @@ try {
                             LEFT JOIN bill_cycles bc ON pid.bill_cycle_id = bc.id
                             WHERE pi.sale_order_id = ?
                               AND pid.status = 'invoiced'
+                              AND pi.is_deleted = 0
                               AND pid.id IN ($placeholders)
                             ORDER BY pid.id ASC";
             $detailParams = array_merge([$saleOrderId], $selectedIds);
@@ -385,6 +396,7 @@ try {
                            INNER JOIN proforma_invoices pi ON pid.p_inv_id = pi.id
                            WHERE pi.sale_order_id = ?
                              AND pid.status = 'invoiced'
+                             AND pi.is_deleted = 0
                              AND pid.id IN ($closePlaceholders)";
             $closeParams = array_merge([$saleOrderId], $closeIds);
             $closeStmt = $pdo->prepare($closeQuery);
@@ -444,9 +456,12 @@ try {
             $bcPrefix = $bcStmt->fetch(PDO::FETCH_ASSOC)['bc_prefix'] ?? 'XX';
 
             $currentYear = date('Y');
+            // Only count non-deleted invoices so a deleted invoice's number becomes
+            // reusable when it was the most recently issued one (the sequence tail).
             $invoiceNumberQuery = "SELECT MAX(CAST(SUBSTRING(invoice_no, LENGTH('PI-{$bcPrefix}-{$currentYear}-') + 1) AS UNSIGNED)) as max_num
                                   FROM proforma_invoices
-                                  WHERE invoice_no LIKE 'PI-{$bcPrefix}-{$currentYear}-%'";
+                                  WHERE invoice_no LIKE 'PI-{$bcPrefix}-{$currentYear}-%'
+                                    AND is_deleted = 0";
             $invoiceNumberStmt = $pdo->prepare($invoiceNumberQuery);
             $invoiceNumberStmt->execute();
             $nextNum = intval($invoiceNumberStmt->fetch(PDO::FETCH_ASSOC)['max_num'] ?? 0) + 1;
@@ -496,9 +511,11 @@ try {
                 }
                 $newerCheckStmt = $pdo->prepare("SELECT EXISTS(
                     SELECT 1 FROM proforma_invoice_details pid2
+                    INNER JOIN proforma_invoices pi2 ON pid2.p_inv_id = pi2.id
                     LEFT JOIN bill_cycles bc2 ON pid2.bill_cycle_id = bc2.id
                     WHERE pid2.sale_order_detail_id = ?
                       AND pid2.status = 'invoiced'
+                      AND pi2.is_deleted = 0
                       AND (bc2.cycle_terms IS NULL OR pid2.bill_followup < bc2.cycle_terms)
                       AND pid2.id > ?
                 ) as has_newer");

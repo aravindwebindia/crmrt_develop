@@ -124,14 +124,15 @@ const Sidebar = () => {
         setIsOpen(false);
       }
     },
-    {
+    ...(user?.role === 'admin' ? [{
       title: 'Settings',
       icon: Settings,
       path: '/settings',
       onClick: () => {
+        navigate('/settings');
         setIsOpen(false);
       }
-    }
+    }] : [])
   ];
 
   const toggleSidebar = () => {

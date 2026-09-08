@@ -290,10 +290,13 @@ try {
             $bc_result = $bc_stmt->fetch(PDO::FETCH_ASSOC);
             $bc_prefix = $bc_result['bc_prefix'] ?? 'XX'; // Default to 'XX' if no prefix
             
-            // Get the highest number for the current year and billing company prefix
-            $invoice_no_query = "SELECT MAX(CAST(SUBSTRING(invoice_no, LENGTH('PI-{$bc_prefix}-{$current_year}-') + 1) AS UNSIGNED)) as max_num 
-                                FROM proforma_invoices 
-                                WHERE invoice_no LIKE 'PI-{$bc_prefix}-{$current_year}-%'";
+            // Get the highest number for the current year and billing company prefix.
+            // Only non-deleted invoices count, so a deleted invoice's number becomes
+            // reusable when it was the most recently issued one (the sequence tail).
+            $invoice_no_query = "SELECT MAX(CAST(SUBSTRING(invoice_no, LENGTH('PI-{$bc_prefix}-{$current_year}-') + 1) AS UNSIGNED)) as max_num
+                                FROM proforma_invoices
+                                WHERE invoice_no LIKE 'PI-{$bc_prefix}-{$current_year}-%'
+                                  AND is_deleted = 0";
             $invoice_no_stmt = $pdo->prepare($invoice_no_query);
             $invoice_no_stmt->execute();
             $result = $invoice_no_stmt->fetch(PDO::FETCH_ASSOC);

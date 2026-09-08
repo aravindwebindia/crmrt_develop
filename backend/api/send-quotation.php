@@ -261,9 +261,11 @@ try {
         
         
         if ($emailResult['success']) {
-            // Update quotation status to 'sent'
-            $updateResult = $quotation->updateStatus($quotation_id, 'sent');
-            
+            // Only move the quotation into the client-send status workflow when
+            // "Send to Client" was selected. A manual To/CC-only send must leave
+            // the quotation status untouched (e.g. remains Draft).
+            $updateResult = $sendToCustomer ? $quotation->updateStatus($quotation_id, 'sent') : true;
+
             // Delete PDF file after successful email send
             if (isset($emailResult['pdf_path']) && !empty($emailResult['pdf_path'])) {
                 try {
@@ -275,7 +277,7 @@ try {
                     error_log("Failed to delete PDF file: " . $e->getMessage());
                 }
             }
-            
+
             if ($updateResult) {
                 echo json_encode([
                     'success' => true,

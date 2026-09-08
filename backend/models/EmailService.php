@@ -972,5 +972,34 @@ class EmailService {
             ];
         }
     }
+
+    // Internal-only reminder email for recurring/proforma invoices approaching or past their due date.
+    // $adminEmails is the admin-configured recipient list (no customer/contact recipient).
+    public function sendRecurringInvoiceReminderEmail(array $adminEmails, $subject, $text_body) {
+        try {
+            $adminEmails = array_values(array_unique(array_filter(array_map('trim', $adminEmails))));
+            if (empty($adminEmails)) {
+                return [
+                    'success' => false,
+                    'message' => 'No admin email configured for reminders'
+                ];
+            }
+
+            $to_email = $adminEmails[0];
+            $to_name = 'Admin';
+            $additionalToEmails = array_slice($adminEmails, 1);
+
+            if ($this->phpmailer_available) {
+                return $this->sendWithPHPMailerPlainText($to_email, $to_name, $subject, $text_body, null, $additionalToEmails, []);
+            }
+            return $this->sendWithMailFunctionPlainText($to_email, $to_name, $subject, $text_body, null, $additionalToEmails, []);
+        } catch (Exception $e) {
+            error_log("Error sending recurring invoice reminder email: " . $e->getMessage());
+            return [
+                'success' => false,
+                'message' => 'Failed to send reminder email: ' . $e->getMessage()
+            ];
+        }
+    }
 }
 ?>
